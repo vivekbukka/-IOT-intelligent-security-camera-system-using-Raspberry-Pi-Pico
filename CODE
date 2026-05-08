@@ -1,0 +1,152 @@
+from machine import Pin, I2C
+import time
+import framebuf
+
+# SSD1306 OLED Driver (128x64)
+class SSD1306_I2C:
+    def __init__(self, width, height, i2c, addr=0x3C):
+        self.i2c = i2c
+        self.addr = addr
+        self.width = width
+        self.height = height
+        self.pages = height // 8
+        self.buffer = bytearray(self.pages * width)
+        self.framebuf = framebuf.FrameBuffer(self.buffer, width, height, framebuf.MONO_VLSB)
+        self.init_display()
+    
+    def init_display(self):
+        for cmd in (
+            0xAE, 0xD5, 0x80, 0xA8, 0x3F, 0xD3, 0x00, 0x40, 0x8D, 0x14,
+            0x20, 0x00, 0xA1, 0xC8, 0xDA, 0x12, 0x81, 0xCF, 0xD9, 0xF1,
+            0xDB, 0x40, 0xA4, 0xA6, 0xAF
+        ):
+            self.write_cmd(cmd)
+        self.fill(0)
+        self.show()
+    
+    def write_cmd(self, cmd):
+        self.i2c.writeto(self.addr, bytearray([0x00, cmd]))
+    
+    def write_data(self, buf):
+        self.i2c.writeto(self.addr, b'\x40' + buf)
+    
+    def show(self):
+        for page in range(self.pages):
+            self.write_cmd(0xB0 + page)
+            self.write_cmd(0x00)
+            self.write_cmd(0x10)
+            self.write_data(self.buffer[page * self.width:(page + 1) * self.width])
+    
+    def fill(self, color):
+        self.framebuf.fill(color)
+    
+    def text(self, string, x, y, color=1):
+        self.framebuf.text(string, x, y, color)
+    
+    def rect(self, x, y, w, h, color):
+        self.framebuf.rect(x, y, w, h, color)
+    
+    def fill_rect(self, x, y, w, h, color):
+        self.framebuf.fill_rect(x, y, w, h, color)
+
+# Initialize I2C for OLED
+i2c = I2C(0, scl=Pin(1), sda=Pin(0), freq=400000)
+oled = SSD1306_I2C(128, 64, i2c)
+
+# Initialize PIR Motion Sensor
+pir_sensor = Pin(15, Pin.IN, Pin.PULL_DOWN)
+
+# Initialize LED and Buzzer
+led = Pin(14, Pin.OUT)
+buzzer = Pin(13, Pin.OUT)
+
+# Security Camera State
+motion_detected = False
+detection_count = 0
+last_detection_time = 0
+cooldown_period = 3  # seconds between detections
+
+# Boot Screen
+def show_boot_screen():
+    oled.fill(0)
+    oled.rect(0, 0, 128, 64, 1)
+    oled.text("SECURITY CAM", 15, 10)
+    oled.text("============", 15, 20)
+    oled.text("Initializing", 20, 35)
+    oled.text("Sensors...", 25, 45)
+    oled.show()
+    time.sleep(2)
+
+# Update Display
+def update_display(status, count):
+    oled.fill(0)
+    oled.rect(0, 0, 128, 64, 1)
+    oled.text("SECURITY CAM", 10, 5)
+    oled.fill_rect(0, 16, 128, 1, 1)
+    
+    oled.text("Status:", 5, 22)
+    oled.text(status, 5, 32)
+    
+    oled.text("Events:", 5, 45)
+    oled.text(str(count), 60, 45)
+    oled.show()
+
+# Trigger Alarm
+def trigger_alarm():
+    led.on()
+    # Buzzer beep pattern
+    for _ in range(3):
+        buzzer.on()
+        time.sleep(0.1)
+        buzzer.off()
+        time.sleep(0.1)
+
+# Clear Alarm
+def clear_alarm():
+    led.off()
+    buzzer.off()
+
+# Main Program
+print("Security Camera System Starting...")
+show_boot_screen()
+
+update_display("STANDBY", detection_count)
+print("System Ready - Monitoring for motion...")
+
+try:
+    while True:
+        current_time = time.time()
+        
+        # Read PIR sensor
+        if pir_sensor.value() == 1:
+            # Motion detected
+            if not motion_detected:
+                # Check cooldown period
+                if (current_time - last_detection_time) > cooldown_period:
+                    motion_detected = True
+                    detection_count += 1
+                    last_detection_time = current_time
+                    
+                    # Trigger alarm
+                    print(f"⚠️  MOTION DETECTED! Event #{detection_count}")
+                    print(f"Timestamp: {time.localtime()}")
+                    trigger_alarm()
+                    update_display("MOTION!", detection_count)
+                    
+        else:
+            # No motion
+            if motion_detected:
+                motion_detected = False
+                clear_alarm()
+                update_display("STANDBY", detection_count)
+                print("Clear - System on standby")
+        
+        time.sleep(0.1)  # Check every 100ms
+
+except KeyboardInterrupt:
+    print("\nShutting down security system...")
+    clear_alarm()
+    oled.fill(0)
+    oled.text("SYSTEM", 35, 20)
+    oled.text("OFFLINE", 30, 35)
+    oled.show()
